@@ -2,6 +2,10 @@
 
 A menu-bar app that turns typing in **any** Mac app into a game. A sibling of the [herdr Typing Madness Meter](https://github.com/tomasrasymas/herdr-typing-madness-meter), using the same rules, without herdr.
 
+![Typing Madness in action: stars, fireworks, combo badges, and Insane mode fire and lasers](docs/demo.gif)
+
+[Watch the full demo in higher quality (MP4)](docs/demo.mp4)
+
 - **Speed colors:** the window you're typing in gets a glowing border and a tint. They go green, then yellow, orange and red as your WPM climbs (25, 45, 65 and 85 WPM by default). Stop typing and they hold, then fade out after 6 seconds.
 - **Insane mode:** at 110 WPM the whole screen catches fire and laser beams shoot across it. Try it with Settings › Preview: Insane.
 - **Fireworks and stars:** milestones set off fireworks, and fast typing makes multicolored stars jump and small fireworks pop.
