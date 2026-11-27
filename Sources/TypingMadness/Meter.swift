@@ -3,7 +3,7 @@
 // to the window you're typing in. It shakes harder the faster you type.
 //
 // Drag it to move it; drag an edge to resize it. Its layout follows its shape
-// (one line, two lines or a square), and the text scales to fill it. Locked,
+// (one line, two lines, compact or square), and the text scales to fill it. Locked,
 // it's click-through. It never takes focus from the app you're typing in.
 
 import AppKit
@@ -149,9 +149,34 @@ private struct MeterValues {
     }()
 }
 
-/// The three layouts. `MeterLayout.auto` picks one from the meter's shape.
+/// The layouts. `MeterLayout.auto` picks one from the meter's shape.
 enum MeterShape: CaseIterable {
-    case singleLine, wide, square
+    /// One long line.
+    case singleLine
+    /// Two lines.
+    case wide
+    /// A big WPM number on the left, the other stats in a column beside it.
+    case compact
+    /// Everything stacked, with a big WPM number on top.
+    case square
+
+    /// How Auto weighs a layout's text size: Single line leaves out the rank,
+    /// XP numbers and today's count, so it has to fit noticeably bigger text
+    /// to win over a layout that shows everything.
+    var preference: CGFloat { self == .singleLine ? 0.75 : 1 }
+}
+
+/// One column of a layout: lines from top to bottom.
+private struct Column {
+    var lines: [NSAttributedString]
+    /// Each line centered in the column, or left-aligned.
+    var centered = false
+    static let gap: CGFloat = 4
+
+    var width: CGFloat { lines.map { $0.size().width }.max() ?? 0 }
+    var height: CGFloat {
+        lines.map { $0.size().height }.reduce(0, +) + Column.gap * CGFloat(max(0, lines.count - 1))
+    }
 }
 
 // MARK: - Drawing, dragging and resizing
@@ -167,9 +192,10 @@ private final class MeterView: NSView {
     private let bold = NSFont.monospacedSystemFont(ofSize: 13, weight: .heavy)
     private let small = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
     private let big = NSFont.monospacedDigitSystemFont(ofSize: 40, weight: .heavy)
+    private let huge = NSFont.monospacedDigitSystemFont(ofSize: 54, weight: .heavy)
     private let dim = NSColor(white: 0.62, alpha: 1)
     private let plain = NSColor(white: 0.9, alpha: 1)
-    private let padX: CGFloat = 14, padY: CGFloat = 10, gap: CGFloat = 4
+    private let padX: CGFloat = 14, padY: CGFloat = 10, columnGap: CGFloat = 14
     private let messageFont: CGFloat = 12
 
     /// The shape used when no size has been dragged: the chosen layout, or two lines.
@@ -177,26 +203,35 @@ private final class MeterView: NSView {
 
     // MARK: Layout
 
-    /// The natural size of a layout at 1×, measured with the sample values.
-    func designSize(_ shape: MeterShape) -> NSSize {
-        if let cached = designCache[shape] { return cached }
-        let lines = self.lines(MeterValues.sample, shape, speed: plain)
-        let w = lines.map { $0.size().width }.max() ?? 0
-        let h = lines.map { $0.size().height }.reduce(0, +) + gap * CGFloat(max(0, lines.count - 1))
-        let size = NSSize(width: (w + padX * 2).rounded(.up), height: (h + padY * 2).rounded(.up))
-        designCache[shape] = size
-        return size
+    /// A layout at 1×, measured with the sample values: its size, and the
+    /// width of each column (fixed, so columns don't shift as numbers change).
+    private struct Design {
+        let size: NSSize
+        let widths: [CGFloat]
     }
-    private var designCache: [MeterShape: NSSize] = [:]
 
-    /// The layout for a box: the chosen one, or (Auto) the one whose natural
-    /// shape is closest to the box's.
+    private func design(_ shape: MeterShape) -> Design {
+        if let cached = designCache[shape] { return cached }
+        let columns = self.columns(MeterValues.sample, shape, speed: plain)
+        let widths = columns.map { $0.width.rounded(.up) }
+        let w = widths.reduce(0, +) + columnGap * CGFloat(max(0, columns.count - 1))
+        let h = columns.map(\.height).max() ?? 0
+        let d = Design(size: NSSize(width: (w + padX * 2).rounded(.up), height: (h + padY * 2).rounded(.up)),
+                       widths: widths)
+        designCache[shape] = d
+        return d
+    }
+    private var designCache: [MeterShape: Design] = [:]
+
+    /// The natural size of a layout at 1×.
+    func designSize(_ shape: MeterShape) -> NSSize { design(shape).size }
+
+    /// The layout for a box: the chosen one, or (Auto) the one that fits the
+    /// box with the biggest text.
     func shape(for box: NSSize) -> MeterShape {
         if let forced = chosenLayout.shape { return forced }
-        let aspect = log(box.width / max(1, box.height))
-        return MeterShape.allCases.min { a, b in
-            let sa = designSize(a), sb = designSize(b)
-            return abs(log(sa.width / sa.height) - aspect) < abs(log(sb.width / sb.height) - aspect)
+        return MeterShape.allCases.max {
+            scale(for: box, $0) * $0.preference < scale(for: box, $1) * $1.preference
         }!
     }
 
@@ -245,23 +280,27 @@ private final class MeterView: NSView {
         lastStrip = strip
         let box = NSRect(x: 0, y: strip, width: bounds.width, height: max(10, bounds.height - strip))
         let shape = self.shape(for: box.size)
-        let design = designSize(shape)
+        let design = self.design(shape)
         let s = scale(for: box.size, shape)
         let speed = Speed.color(tier).map(nsColor) ?? plain
 
         // Draw the layout at 1× in its design box, scaled and centered in the box.
+        // Each column is centered vertically.
         NSGraphicsContext.saveGraphicsState()
         let t = NSAffineTransform()
-        t.translateX(by: box.midX - design.width * s / 2, yBy: box.midY - design.height * s / 2)
+        t.translateX(by: box.midX - design.size.width * s / 2, yBy: box.midY - design.size.height * s / 2)
         t.scale(by: s)
         t.concat()
-        var y = design.height - padY
-        for line in lines(values, shape, speed: speed) {
-            let size = line.size()
-            y -= size.height
-            let x = shape == .square ? (design.width - size.width) / 2 : padX
-            line.draw(at: NSPoint(x: x, y: y))
-            y -= gap
+        var x = padX
+        for (column, width) in zip(columns(values, shape, speed: speed), design.widths) {
+            var y = (design.size.height + column.height) / 2
+            for line in column.lines {
+                let size = line.size()
+                y -= size.height
+                line.draw(at: NSPoint(x: column.centered ? x + (width - size.width) / 2 : x, y: y))
+                y -= Column.gap
+            }
+            x += width + columnGap
         }
         NSGraphicsContext.restoreGraphicsState()
 
@@ -273,8 +312,8 @@ private final class MeterView: NSView {
         }
     }
 
-    /// The lines of a layout, top to bottom.
-    private func lines(_ v: MeterValues, _ shape: MeterShape, speed: NSColor) -> [NSAttributedString] {
+    /// The columns of a layout, left to right.
+    private func columns(_ v: MeterValues, _ shape: MeterShape, speed: NSColor) -> [Column] {
         let purple = NSColor.systemPurple
         let comboColor = v.combo >= 25 ? NSColor.systemPink : plain
         let xpFraction = Double(v.xp) / Double(max(1, v.span))
@@ -291,7 +330,7 @@ private final class MeterView: NSView {
             line.append(text("  ACC \(acc)%", font, dim))
             line.append(text("  LV \(v.level) ", bold, purple))
             line.append(bar(xpFraction, width: 8, color: purple))
-            return [line]
+            return [Column(lines: [line])]
 
         case .wide:
             let one = NSMutableAttributedString()
@@ -308,14 +347,29 @@ private final class MeterView: NSView {
             two.append(bar(xpFraction, width: 18, color: purple))
             two.append(text("  \(group(v.xp))/\(group(v.span)) XP", font, dim))
             two.append(text("   today \(group(v.today)) chars", font, dim))
-            return [one, two]
+            return [Column(lines: [one, two])]
+
+        case .compact:
+            let wpmBar = NSMutableAttributedString(attributedString: bar(Double(v.wpm) / 100, width: 12, color: speed))
+            wpmBar.append(text(" peak \(v.peak)", small, dim))
+            let combo = NSMutableAttributedString(attributedString: text("COMBO \(v.combo) ", bold, comboColor))
+            combo.append(text(String(format: "×%.1f", v.multiplier), font, dim))
+            combo.append(text("  ACC \(acc)%", font, dim))
+            let level = NSMutableAttributedString(attributedString: text("LV \(v.level) ", bold, purple))
+            level.append(text(v.rank, font, plain))
+            let xpBar = NSMutableAttributedString(attributedString: bar(xpFraction, width: 12, color: purple))
+            xpBar.append(text(" \(group(v.xp))/\(group(v.span)) XP", small, dim))
+            return [
+                Column(lines: [text("\(v.wpm)", huge, speed), text("WPM", small, dim)], centered: true),
+                Column(lines: [wpmBar, combo, level, xpBar, text("today \(group(v.today)) chars", small, dim)]),
+            ]
 
         case .square:
             let combo = NSMutableAttributedString(attributedString: text("COMBO \(v.combo) ", bold, comboColor))
             combo.append(text(String(format: "×%.1f", v.multiplier), font, dim))
             let level = NSMutableAttributedString(attributedString: text("LV \(v.level) ", bold, purple))
             level.append(text(v.rank, font, plain))
-            return [
+            return [Column(lines: [
                 text("\(v.wpm)", big, speed),
                 text("WPM · peak \(v.peak)", small, dim),
                 bar(Double(v.wpm) / 100, width: 12, color: speed),
@@ -324,7 +378,7 @@ private final class MeterView: NSView {
                 level,
                 bar(xpFraction, width: 12, color: purple),
                 text("\(group(v.xp))/\(group(v.span)) XP · today \(group(v.today))", small, dim),
-            ]
+            ], centered: true)]
         }
     }
 

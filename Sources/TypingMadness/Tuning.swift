@@ -273,13 +273,14 @@ enum MeterPosition: String, CaseIterable {
 
 /// The meter's layout. Auto picks one from the meter's shape as you resize it.
 enum MeterLayout: String, CaseIterable {
-    case auto, singleLine, wide, square
+    case auto, singleLine, wide, compact, square
 
     var title: String {
         switch self {
         case .auto: return "Fit to shape"
         case .singleLine: return "Single line"
         case .wide: return "Two lines"
+        case .compact: return "Compact"
         case .square: return "Square"
         }
     }
@@ -290,6 +291,7 @@ enum MeterLayout: String, CaseIterable {
         case .auto: return nil
         case .singleLine: return .singleLine
         case .wide: return .wide
+        case .compact: return .compact
         case .square: return .square
         }
     }
